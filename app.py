@@ -264,11 +264,7 @@ class SapAutomator:
             try:
                 session.findById("wnd[0]/usr/btn%_R_MATNR_%_APP_%-VALU_PUSH").Press()
                 try:
-                    session.findById("wnd[1]/tbar[0]/btn[16]").Press()
-                except Exception:
-                    pass
-                try:
-                    session.findById("wnd[1]/tbar[0]/btn[24]").Press()
+                    session.findById("wnd[1]/tbar[0]/btn[16]").Press()  # Limpar seleção existente
                 except Exception:
                     pass
 
@@ -284,8 +280,7 @@ class SapAutomator:
             exec_ctrl.checkpoint(3, f"Passo 3/9: Definindo Centro ({p.get('plant')}) e Depósito ({p.get('storage_loc')})", debug_cfg)
             try:
                 session.findById("wnd[0]/usr/btn%_R_WERKS_%_APP_%-VALU_PUSH").Press()
-                session.findById("wnd[1]/tbar[0]/btn[16]").Press()
-                session.findById("wnd[1]/tbar[0]/btn[24]").Press()
+                session.findById("wnd[1]/tbar[0]/btn[16]").Press()  # Limpar seleção existente
                 session.findById("wnd[1]/tbar[0]/btn[8]").Press()
             except Exception:
                 pass
@@ -293,8 +288,7 @@ class SapAutomator:
 
             try:
                 session.findById("wnd[0]/usr/btn%_R_LGORT_%_APP_%-VALU_PUSH").Press()
-                session.findById("wnd[1]/tbar[0]/btn[16]").Press()
-                session.findById("wnd[1]/tbar[0]/btn[24]").Press()
+                session.findById("wnd[1]/tbar[0]/btn[16]").Press()  # Limpar seleção existente
                 session.findById("wnd[1]/tbar[0]/btn[8]").Press()
             except Exception:
                 pass
@@ -306,7 +300,7 @@ class SapAutomator:
             exec_ctrl.checkpoint(4, f"Passo 4/9: Configurando Range de Endereços ({bin_start or 'Vazio'} até {bin_end or 'Vazio'})", debug_cfg)
             try:
                 session.findById("wnd[0]/usr/btn%_R_LGPBE_%_APP_%-VALU_PUSH").Press()
-                session.findById("wnd[1]/tbar[0]/btn[24]").Press()
+                session.findById("wnd[1]/tbar[0]/btn[16]").Press()  # Limpar seleção existente
                 session.findById("wnd[1]/tbar[0]/btn[8]").Press()
             except Exception:
                 pass
