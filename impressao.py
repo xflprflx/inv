@@ -164,7 +164,7 @@ def _ficha_flowables(f: dict) -> list:
     # Tabela de itens (cabeçalho repetido em cada página)
     itens = f.get("itens") or []
     story.append(_p(f"LISTA DE ITENS PARA CONTAGEM ({len(itens)} REGISTROS)", _st_section))
-    data = [[_p("#", _st_th), _p("CÓDIGO DO MATERIAL", _st_th), _p("LOTE", _st_th),
+    data = [[_p("#", _st_th), _p("CÓDIGO DO MATERIAL", _st_th), _p("LOTE", _st_th), _p("TEs", _st_th),
              _p("POSIÇÃO NO DEPÓSITO", _st_th), _p("QTD. FÍSICA CONTADA", _st_th)]]
     if itens:
         for i, item in enumerate(itens, start=1):
@@ -172,13 +172,14 @@ def _ficha_flowables(f: dict) -> list:
                 _p(i, _st_cell),
                 _p(item.get("material", ""), _st_cell_bold),
                 _p(item.get("lote", ""), _st_cell),
+                _p(item.get("tipo_estoque", ""), _st_cell),
                 _p(item.get("posicao", ""), _st_cell),
                 "",
             ])
     else:
-        data.append([_p(f"Nenhum item individual listado. Consulte o coletor pelo código de barras da ficha {f['numero_ficha']}.", _st_cell), "", "", "", ""])
+        data.append([_p(f"Nenhum item individual listado. Consulte o coletor pelo código de barras da ficha {f['numero_ficha']}.", _st_cell), "", "", "", "", ""])
 
-    col_w = [12 * mm, 52 * mm, 34 * mm, 44 * mm]
+    col_w = [12 * mm, 46 * mm, 32 * mm, 13 * mm, 40 * mm]
     col_w.append(CONTENT_WIDTH - sum(col_w))
     items_table = Table(data, colWidths=col_w, repeatRows=1)
     style = [

@@ -150,38 +150,60 @@ def get_db():
     return conn
 
 
+FICHAS_COLUNAS = {
+    "numero_ficha": "TEXT NOT NULL DEFAULT ''",
+    "modo_execucao": "TEXT NOT NULL DEFAULT ''",
+    "centro": "TEXT NOT NULL DEFAULT ''",
+    "deposito": "TEXT NOT NULL DEFAULT ''",
+    "endereco_inicio": "TEXT",
+    "endereco_fim": "TEXT",
+    "total_materiais": "INTEGER DEFAULT 0",
+    "itens_json": "TEXT DEFAULT '[]'",
+    "max_posicoes": "TEXT",
+    "data_criacao": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+}
+
+
 def init_db():
     """
-    Inicializa a tabela de fichas e garante a existência da coluna 'itens_json'
-    para armazenar os itens detalhados que serão impressos na folha A4.
+    Cria/atualiza as tabelas do SQLite.
+    Bancos de versões anteriores recebem as colunas que faltam; se a tabela antiga
+    tiver colunas obrigatórias incompatíveis, ela é preservada com outro nome
+    (fichas_antigo_AAAAMMDDHHMMSS) e uma tabela nova é criada.
     """
-    with get_db() as conn:
-        conn.execute("""
+    colunas_sql = ",\n                ".join(f"{nome} {tipo}" for nome, tipo in FICHAS_COLUNAS.items())
+    create_fichas = f"""
             CREATE TABLE IF NOT EXISTS fichas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero_ficha TEXT NOT NULL,
-                modo_execucao TEXT NOT NULL,
-                centro TEXT NOT NULL,
-                deposito TEXT NOT NULL,
-                endereco_inicio TEXT,
-                endereco_fim TEXT,
-                total_materiais INTEGER DEFAULT 0,
-                itens_json TEXT DEFAULT '[]',
-                max_posicoes TEXT,
-                data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP
+                {colunas_sql}
             )
-        """)
+        """
+    with get_db() as conn:
+        conn.execute(create_fichas)
+
+        existentes = {row["name"]: row for row in conn.execute("PRAGMA table_info(fichas)")}
+        incompativeis = [
+            nome for nome, row in existentes.items()
+            if nome != "id" and nome not in FICHAS_COLUNAS and row["notnull"] and row["dflt_value"] is None
+        ]
+        if incompativeis:
+            backup = "fichas_antigo_" + datetime.now().strftime("%Y%m%d%H%M%S")
+            conn.execute(f"ALTER TABLE fichas RENAME TO {backup}")
+            conn.execute(create_fichas)
+            print(f"[DB] Tabela antiga incompatível preservada como '{backup}'.")
+        else:
+            for nome, tipo in FICHAS_COLUNAS.items():
+                if nome not in existentes:
+                    tipo_alter = "TEXT" if nome == "data_criacao" else tipo  # SQLite não aceita DEFAULT não constante em ALTER
+                    conn.execute(f"ALTER TABLE fichas ADD COLUMN {nome} {tipo_alter}")
+                    print(f"[DB] Coluna '{nome}' adicionada à tabela fichas.")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS config (
                 chave TEXT PRIMARY KEY,
                 valor TEXT
             )
         """)
-        # Migração segura caso o banco já exista de versões anteriores sem a coluna itens_json
-        try:
-            conn.execute("ALTER TABLE fichas ADD COLUMN itens_json TEXT DEFAULT '[]'")
-        except sqlite3.OperationalError:
-            pass
         conn.commit()
 
 
@@ -273,74 +295,125 @@ class SapAutomator:
         except Exception as e:
             logger.info("Falha ao registrar a tela do SAP: %s", e)
 
-    @staticmethod
-    def extract_docs_and_items_from_screen(session, fallback_materials: list) -> dict:
-        """
-        Lê todos os controles GuiLabel da tela 'Documentos inventário físico criados diretamente',
-        agrupa os elementos por linha (CharTop) e extrai o número da ficha e seus respectivos itens.
-        Retorna um dicionário no formato:
-        {
-            "100061411": [
-                {"material": "110.345", "lote": "RACV8", "posicao": "A.01.01.01"},
-                ...
-            ]
-        }
-        """
-        usr_area = session.findById("wnd[0]/usr")
-        rows_by_y = {}
+    # Cabeçalhos da lista "Documentos inventário físico criados diretamente" (MI31)
+    LIST_HEADERS = {
+        "Pla.": "centro",
+        "Dep.": "deposito",
+        "Material": "material",
+        "Lote": "lote",
+        "TEs": "tipo_estoque",
+        "Pos.dpst.": "posicao",
+        "Grp.merc.": "grupo_mercadoria",
+        "Doc.inv.": "documento",
+    }
 
-        # 1. Agrupa todos os elementos de texto da tela pela coordenada vertical (linha Y)
+    @staticmethod
+    def _read_visible_rows(usr_area) -> dict:
+        """Retorna {linha_visivel: [(coluna, texto), ...]} com os GuiLabel da tela."""
+        rows = {}
         for i in range(usr_area.Children.Count):
             try:
                 elem = usr_area.Children(i)
                 text = str(elem.Text).strip()
-                if not text:
-                    continue
-                y_coord = elem.CharTop
-                x_coord = elem.CharLeft
-                rows_by_y.setdefault(y_coord, []).append((x_coord, text))
+                if text:
+                    rows.setdefault(elem.CharTop, []).append((elem.CharLeft, text))
             except Exception:
                 continue
+        return {y: sorted(cells) for y, cells in rows.items()}
 
+    @classmethod
+    def extract_docs_and_items_from_screen(cls, session, fallback_materials: list) -> dict:
+        """
+        Lê a lista de saída da MI31 usando as colunas do cabeçalho
+        (Pla. | Dep. | Material | Lote | TEs | Pos.dpst. | Grp.merc. | Doc.inv.)
+        e rola a tela até o fim para capturar todas as linhas.
+        Retorna {"100061266": [{"material": ..., "lote": ..., "posicao": ...}, ...]}.
+        """
+        usr_area = session.findById("wnd[0]/usr")
+        header_cols = None   # {coluna: campo}
+        seen = set()
         docs_map = {}
+        total_sap = None
 
-        # 2. Percorre cada linha ordenada da esquerda para a direita (coordenada X)
-        for y_coord in sorted(rows_by_y.keys()):
-            row_cells = [val for _, val in sorted(rows_by_y[y_coord], key=lambda item: item[0])]
-            
-            # Procura na linha um número de documento de inventário MM (8 a 10 dígitos numéricos, ex: 100061411)
-            doc_candidates = [c for c in row_cells if re.match(r"^\d{8,10}$", c)]
-            if not doc_candidates:
-                continue
+        try:
+            scrollbar = usr_area.VerticalScrollbar
+            max_pos = int(scrollbar.Maximum)
+            page = max(1, int(scrollbar.PageSize) - 1)
+        except Exception:
+            scrollbar, max_pos, page = None, 0, 1
 
-            doc_num = doc_candidates[0]
-            if doc_num not in docs_map:
-                docs_map[doc_num] = []
+        pos = 0
+        while True:
+            if scrollbar is not None:
+                try:
+                    scrollbar.Position = pos
+                    usr_area = session.findById("wnd[0]/usr")
+                except Exception as e:
+                    logger.info("Falha ao rolar a lista para a posição %s: %s", pos, e)
+                    break
 
-            # Estrutura típica das colunas na linha de dados do relatório MI31:
-            # [0]: Centro (4404) | [1]: Depósito (0001) | [2]: Material (110.345) | [3]: Lote (RACV8) ...
-            material_code = row_cells[2] if len(row_cells) > 2 else ""
-            batch_code = row_cells[3] if len(row_cells) > 3 and row_cells[3] != doc_num else "-"
-            
-            # Identifica posição de depósito na linha (se houver)
-            bin_code = "-"
-            if len(row_cells) >= 6:
-                # Na tela padrão: [0]Pla, [1]Dep, [2]Material, [3]Lote, [4]TEs, [5]Pos.dpst.
-                bin_code = row_cells[5]
+            for _, cells in sorted(cls._read_visible_rows(usr_area).items()):
+                texts = [t for _, t in cells]
 
-            if material_code and material_code != doc_num:
-                docs_map[doc_num].append({
-                    "material": material_code,
-                    "lote": batch_code,
-                    "posicao": bin_code
+                # Estatística do SAP: quantidade de itens gerados
+                joined = " ".join(texts)
+                if total_sap is None and "gerados diretam" in joined:
+                    total_sap = "aguardando"
+                    continue
+                if total_sap == "aguardando":
+                    m = re.search(r"(\d+)\s*$", joined)
+                    total_sap = int(m.group(1)) if m else None
+
+                # Linha de cabeçalho (define a posição de cada coluna)
+                if "Doc.inv." in texts and "Material" in texts:
+                    header_cols = {col: cls.LIST_HEADERS[t] for col, t in cells if t in cls.LIST_HEADERS}
+                    continue
+                if not header_cols:
+                    continue
+
+                # Associa cada célula ao cabeçalho mais próximo à esquerda
+                header_positions = sorted(header_cols)
+                row = {}
+                for col, text in cells:
+                    candidatos = [h for h in header_positions if h <= col]
+                    if candidatos:
+                        row[header_cols[candidatos[-1]]] = text
+
+                doc_num = row.get("documento", "")
+                if not re.fullmatch(r"\d{8,10}", doc_num) or not row.get("material"):
+                    continue  # linhas de status ("Criar doc."), totais etc.
+
+                key = tuple(row.get(k, "") for k in ("documento", "material", "lote", "tipo_estoque", "posicao"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                docs_map.setdefault(doc_num, []).append({
+                    "material": row.get("material", ""),
+                    "lote": row.get("lote") or "-",
+                    "posicao": row.get("posicao") or "-",
+                    "tipo_estoque": row.get("tipo_estoque", ""),
                 })
 
-        # 3. Se algum documento foi identificado mas sem linhas detalhadas, usa a lista de entrada como fallback
+            if scrollbar is None or pos >= max_pos:
+                break
+            pos = min(pos + page, max_pos)
+
+        # Volta a lista para o topo
+        if scrollbar is not None:
+            try:
+                scrollbar.Position = 0
+            except Exception:
+                pass
+
+        lidos = sum(len(v) for v in docs_map.values())
+        logger.info("Itens lidos da lista: %d | Itens informados pelo SAP: %s", lidos, total_sap)
+        if isinstance(total_sap, int) and total_sap != lidos:
+            logger.info("ATENÇÃO: quantidade lida (%d) difere da estatística do SAP (%d).", lidos, total_sap)
+
+        # Documento identificado sem itens: usa a lista de entrada como fallback
         for doc_num in docs_map:
             if not docs_map[doc_num] and fallback_materials:
-                docs_map[doc_num] = [
-                    {"material": m, "lote": "-", "posicao": "-"} for m in fallback_materials
-                ]
+                docs_map[doc_num] = [{"material": m, "lote": "-", "posicao": "-"} for m in fallback_materials]
 
         return docs_map
 
@@ -492,7 +565,6 @@ class SapAutomator:
 
             # PASSO 9: Extração dos Documentos e Itens da Tela de Saída
             exec_ctrl.checkpoint(9, "Passo 9/9: Lendo fichas e materiais gerados na tela de saída", debug_cfg)
-            cls.dump_screen(session)
             docs_map = cls.extract_docs_and_items_from_screen(session, mat_items)
             status_text = session.findById("wnd[0]/sbar").Text
 
