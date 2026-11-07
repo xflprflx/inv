@@ -85,6 +85,14 @@
         .btn-secondary { background-color: #e2e8f0; color: var(--text); }
         .btn-secondary:hover { background-color: #cbd5e1; }
 
+        .defaults-bar { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+        .defaults-bar .btn-sm { background-color: #e2e8f0; color: var(--text); }
+        .defaults-bar .btn-sm:hover { background-color: #cbd5e1; }
+        .confirm-list { margin: 0 0 6px 18px; font-size: 0.9rem; color: #7f1d1d; }
+        .confirm-list li { margin-bottom: 6px; }
+        .btn-confirm-danger { background-color: #dc2626; }
+        .btn-confirm-danger:hover { background-color: #b91c1c; }
+
         .status-msg { margin-top: 14px; padding: 12px; border-radius: 6px; font-size: 0.9rem; display: none; }
         .status-success { background: #dcfce7; color: #166534; display: block; }
         .status-error { background: #fee2e2; color: #991b1b; display: block; }
@@ -92,7 +100,7 @@
 </head>
 <body>
 <div class="container">
-    <div class="card">
+    <div class="card" id="form_mi31">
         <h1>Emissão de Fichas de Inventário MI31 (Formato A4)</h1>
 
         <div class="printer-bar">
@@ -223,6 +231,11 @@
             </div>
         </div>
 
+        <div class="defaults-bar">
+            <button type="button" class="btn-sm" onclick="salvarPadroes()" title="Os valores atuais de todos os campos (inclusive vazios) passam a ser carregados ao abrir o programa">💾 Salvar valores atuais como padrão</button>
+            <button type="button" class="btn-sm" onclick="restaurarPadraoOriginal()">↺ Restaurar padrão original</button>
+        </div>
+
         <button id="btn_gerar" onclick="iniciarExecucao()">Criar Ficha na MI31 e Abrir Impressão A4</button>
         <button id="btn_fechar_sap" class="btn-danger" onclick="fecharConexaoSap()">⏏ Fechar Conexão SAP</button>
         <div id="status_box" class="status-msg"></div>
@@ -285,7 +298,22 @@
     </div>
 </div>
 
+<!-- Confirmação de execução abrangente (sem itens/endereços ou sem centro) -->
+<div id="confirm_modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm_modal_title">
+    <div class="modal">
+        <h2 id="confirm_modal_title">⚠️ Confirmar geração de fichas</h2>
+        <p>Verifique os filtros antes de continuar:</p>
+        <ul id="confirm_list" class="confirm-list"></ul>
+        <p>Deseja realmente continuar?</p>
+        <div class="modal-actions">
+            <button type="button" class="btn-secondary" id="btn_confirm_cancel">Cancelar</button>
+            <button type="button" class="btn-confirm-danger" id="btn_confirm_ok">Sim, gerar mesmo assim</button>
+        </div>
+    </div>
+</div>
+
 <script>
+const PADROES = {{ padroes|tojson }};
 const SOLICITAR_IMPRESSORA = {{ 'true' if solicitar_impressora else 'false' }};
 let pollTimer = null;
 
@@ -297,6 +325,88 @@ function toggleDebugPanel() {
     } else {
         controls.classList.remove("active");
     }
+}
+
+function confirmarExecucaoAbrangente(avisos) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("confirm_modal");
+        const lista = document.getElementById("confirm_list");
+        lista.innerHTML = "";
+        for (const aviso of avisos) {
+            const li = document.createElement("li");
+            li.innerText = aviso;
+            lista.appendChild(li);
+        }
+        const fechar = (resposta) => {
+            modal.classList.remove("open");
+            document.getElementById("btn_confirm_ok").onclick = null;
+            document.getElementById("btn_confirm_cancel").onclick = null;
+            resolve(resposta);
+        };
+        document.getElementById("btn_confirm_ok").onclick = () => fechar(true);
+        document.getElementById("btn_confirm_cancel").onclick = () => fechar(false);
+        modal.classList.add("open");
+        document.getElementById("btn_confirm_cancel").focus();  // foco no botão seguro
+    });
+}
+
+// ----- Valores padrão do formulário -----
+function camposFormulario() {
+    return document.querySelectorAll("#form_mi31 input[id], #form_mi31 select[id], #form_mi31 textarea[id]");
+}
+
+function lerFormulario() {
+    const valores = {};
+    camposFormulario().forEach((el) => {
+        if (el.type === "radio") {
+            if (el.checked) valores[el.name] = el.value;
+        } else if (el.type === "checkbox") {
+            valores[el.id] = el.checked;
+        } else {
+            valores[el.id] = el.value;
+        }
+    });
+    return valores;
+}
+
+function aplicarPadroes(valores) {
+    if (!valores) return;
+    camposFormulario().forEach((el) => {
+        if (el.type === "radio") {
+            if (el.name in valores) el.checked = valores[el.name] === el.value;
+        } else if (el.id in valores) {
+            if (el.type === "checkbox") el.checked = !!valores[el.id];
+            else el.value = valores[el.id] ?? "";
+        }
+    });
+    toggleDebugPanel();
+    toggleSecondsInput();
+}
+
+async function salvarPadroes() {
+    const resp = await fetch("/api/padroes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(lerFormulario())
+    });
+    const res = await resp.json();
+    mostrarAviso(res.message, res.success);
+}
+
+async function restaurarPadraoOriginal() {
+    if (!confirm("Descartar os valores padrão salvos e voltar ao padrão original do programa?")) return;
+    const resp = await fetch("/api/padroes", { method: "DELETE" });
+    const res = await resp.json();
+    // Volta cada campo ao valor original definido no HTML
+    camposFormulario().forEach((el) => {
+        if (el.type === "radio" || el.type === "checkbox") el.checked = el.defaultChecked;
+        else if (el.tagName === "SELECT") {
+            Array.from(el.options).forEach((o) => { o.selected = o.defaultSelected; });
+        } else el.value = el.defaultValue;
+    });
+    toggleDebugPanel();
+    toggleSecondsInput();
+    mostrarAviso(res.message, res.success);
 }
 
 function toggleSecondsInput() {
@@ -311,7 +421,7 @@ function toggleSecondsInput() {
     }
 }
 
-async function iniciarExecucao() {
+async function iniciarExecucao(confirmado = false) {
     const btn = document.getElementById("btn_gerar");
     const statusBox = document.getElementById("status_box");
     const execMode = document.querySelector('input[name="exec_mode"]:checked').value;
@@ -348,7 +458,9 @@ async function iniciarExecucao() {
         chkXWART: document.getElementById("chkXWART").checked,
         chkXUMKE: document.getElementById("chkXUMKE").checked,
         chkXUMKEW: document.getElementById("chkXUMKEW").checked,
-        txtXBLNI: document.getElementById("txtXBLNI").value.trim()
+        txtXBLNI: document.getElementById("txtXBLNI").value.trim(),
+
+        confirmado_abrangente: confirmado === true
     };
 
     btn.disabled = true;
@@ -360,6 +472,16 @@ async function iniciarExecucao() {
         body: JSON.stringify(payload)
     });
     const res = await resp.json();
+
+    if (!res.success && res.precisa_confirmacao) {
+        btn.disabled = false;
+        if (await confirmarExecucaoAbrangente(res.avisos)) {
+            return iniciarExecucao(true);
+        }
+        statusBox.className = "status-msg status-error";
+        statusBox.innerText = "Geração cancelada. Informe materiais, endereços e/ou centro.";
+        return;
+    }
 
     if (!res.success) {
         statusBox.className = "status-msg status-error";
@@ -570,6 +692,8 @@ async function salvarImpressora(nome) {
     document.getElementById("printer_none").style.display = res.impressora ? "none" : "inline";
     document.getElementById("printer_modal").classList.remove("open");
 }
+
+aplicarPadroes(PADROES);
 
 if (SOLICITAR_IMPRESSORA) {
     abrirSeletorImpressora();

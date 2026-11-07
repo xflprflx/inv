@@ -672,7 +672,46 @@ def index():
         fichas=fichas,
         solicitar_impressora=not printer_state["confirmada"],
         impressora_atual=get_config("impressora"),
+        padroes=carregar_padroes(),
     )
+
+
+def avisos_execucao_abrangente(p: dict) -> list:
+    """Lista os motivos pelos quais a execução atingiria um volume de estoque maior que o normal."""
+    avisos = []
+    sem_itens = not str(p.get("materials_list", "")).strip()
+    sem_enderecos = not str(p.get("bin_start", "")).strip() and not str(p.get("bin_end", "")).strip()
+    if sem_itens and sem_enderecos:
+        avisos.append("Nenhum material e nenhum endereço foram informados: serão geradas fichas para TODO o estoque"
+                      + (f" do depósito {p.get('storage_loc')}." if str(p.get("storage_loc", "")).strip() else "."))
+    if not str(p.get("plant", "")).strip():
+        avisos.append("O Centro (WERKS) não foi informado: a seleção incluirá TODOS os centros.")
+    return avisos
+
+
+@app.route("/api/padroes", methods=["GET", "POST", "DELETE"])
+def api_padroes():
+    """
+    Valores padrão do formulário definidos pelo usuário.
+    GET retorna, POST salva (campos vazios são válidos), DELETE volta ao padrão original.
+    """
+    if request.method == "POST":
+        valores = request.json or {}
+        if not isinstance(valores, dict):
+            return jsonify({"success": False, "message": "Formato inválido."}), 400
+        set_config("padroes_formulario", json.dumps(valores, ensure_ascii=False))
+        return jsonify({"success": True, "message": "Valores atuais salvos como padrão."})
+    if request.method == "DELETE":
+        set_config("padroes_formulario", "")
+        return jsonify({"success": True, "message": "Padrão original restaurado."})
+    return jsonify(carregar_padroes())
+
+
+def carregar_padroes() -> dict:
+    try:
+        return json.loads(get_config("padroes_formulario") or "{}")
+    except ValueError:
+        return {}
 
 
 @app.route("/api/iniciar", methods=["POST"])
@@ -683,9 +722,19 @@ def api_iniciar():
     if exec_ctrl.is_running:
         return jsonify({"success": False, "message": "Já existe uma execução em andamento."}), 400
 
-    p = request.json
-    if not p.get("plant") or not p.get("storage_loc"):
-        return jsonify({"success": False, "message": "Preencha obrigatoriamente o Centro e o Depósito."}), 400
+    p = request.json or {}
+
+    # Proteção contra execuções abrangentes acidentais: exige confirmação explícita
+    avisos = avisos_execucao_abrangente(p)
+    if avisos and not p.get("confirmado_abrangente"):
+        return jsonify({
+            "success": False,
+            "precisa_confirmacao": True,
+            "avisos": avisos,
+            "message": "Confirmação necessária: " + " ".join(avisos),
+        }), 409
+    if avisos:
+        print("[MI31] Execução abrangente confirmada pelo usuário: " + " | ".join(avisos))
 
     debug_cfg = {
         "enabled": bool(p.get("debug_enabled", False)),
