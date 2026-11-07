@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emissor de Fichas MI31 (A4) + Debug Passo a Passo</title>
+    <title>Emissor de Fichas MI31</title>
     <style>
         :root {
             --primary: #0f172a;
@@ -64,6 +64,27 @@
         th, td { text-align: left; padding: 9px; border-bottom: 1px solid var(--border); }
         th { color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
 
+        .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+        .btn-sm.btn-view { background-color: #475569; }
+        .btn-sm.btn-view:hover { background-color: #334155; }
+        .btn-sm.btn-dl { background-color: #0369a1; }
+        .btn-sm.btn-dl:hover { background-color: #075985; }
+        .btn-sm.btn-print { background-color: var(--success); }
+        .btn-sm.btn-print:hover { background-color: #15803d; }
+
+        .printer-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 18px; font-size: 0.9rem; }
+        .printer-bar .warn { color: #b45309; font-weight: 600; }
+
+        .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55); display: none; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+        .modal-backdrop.open { display: flex; }
+        .modal { background: #fff; border-radius: 8px; padding: 22px; width: 100%; max-width: 480px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+        .modal h2 { margin-bottom: 6px; }
+        .modal p { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px; }
+        .modal .modal-actions { display: flex; gap: 10px; margin-top: 16px; }
+        .modal .modal-actions button { width: auto; flex: 1; }
+        .btn-secondary { background-color: #e2e8f0; color: var(--text); }
+        .btn-secondary:hover { background-color: #cbd5e1; }
+
         .status-msg { margin-top: 14px; padding: 12px; border-radius: 6px; font-size: 0.9rem; display: none; }
         .status-success { background: #dcfce7; color: #166534; display: block; }
         .status-error { background: #fee2e2; color: #991b1b; display: block; }
@@ -73,6 +94,11 @@
 <div class="container">
     <div class="card">
         <h1>Emissão de Fichas de Inventário MI31 (Formato A4)</h1>
+
+        <div class="printer-bar">
+            <span>🖨️ Impressora: <strong id="printer_name">{{ impressora_atual or '' }}</strong><span id="printer_none" class="warn" {% if impressora_atual %}style="display:none"{% endif %}>nenhuma selecionada (apenas visualizar/baixar)</span></span>
+            <button type="button" class="btn-sm" onclick="abrirSeletorImpressora()">Trocar impressora</button>
+        </div>
 
         <!-- PAINEL DE MODO DEBUG PASSO A PASSO -->
         <div class="debug-panel">
@@ -205,7 +231,7 @@
     <!-- Histórico SQLite -->
     <div class="card">
         <h2>Histórico de Fichas Emitidas</h2>
-        <table>
+        <table id="historico">
             <thead>
                 <tr>
                     <th>Data/Hora</th>
@@ -231,7 +257,11 @@
                     </td>
                     <td>{{ f.total_materiais }}</td>
                     <td>
-                        <button class="btn-sm" onclick="abrirImpressaoA4('{{ f.id }}')">🖨️ Imprimir A4</button>
+                        <div class="actions">
+                            <button class="btn-sm btn-view" onclick="visualizarPdf('{{ f.id }}')">👁 Visualizar</button>
+                            <button class="btn-sm btn-dl" onclick="baixarPdf('{{ f.id }}')">⬇ Baixar</button>
+                            <button class="btn-sm btn-print" onclick="imprimirDireto('{{ f.id }}', this)">🖨️ Imprimir</button>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}
@@ -240,7 +270,23 @@
     </div>
 </div>
 
+<!-- Seleção de impressora (solicitada ao iniciar o programa) -->
+<div id="printer_modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="printer_modal_title">
+    <div class="modal">
+        <h2 id="printer_modal_title">Selecione a impressora</h2>
+        <p>As fichas A4 serão enviadas diretamente para esta impressora ao clicar em "Imprimir".</p>
+        <label for="printer_select">Impressora</label>
+        <select id="printer_select"></select>
+        <div id="printer_modal_msg" class="status-msg"></div>
+        <div class="modal-actions">
+            <button type="button" class="btn-secondary" onclick="salvarImpressora('')">Continuar sem impressora</button>
+            <button type="button" id="btn_salvar_impressora" onclick="salvarImpressora(document.getElementById('printer_select').value)">Confirmar</button>
+        </div>
+    </div>
+</div>
+
 <script>
+const SOLICITAR_IMPRESSORA = {{ 'true' if solicitar_impressora else 'false' }};
 let pollTimer = null;
 
 function toggleDebugPanel() {
@@ -357,10 +403,20 @@ async function verificarStatusExecucao() {
                 statusBox.className = "status-msg status-error";
                 statusBox.innerText = `Erro no SAP: ${st.error}`;
             } else if (st.created_ids && st.created_ids.length > 0) {
+                const ids = st.created_ids.join(",");
                 statusBox.className = "status-msg status-success";
-                statusBox.innerText = `${st.step_desc} - Abrindo visualização A4...`;
-                abrirImpressaoA4(st.created_ids.join(","));
-                setTimeout(() => window.location.reload(), 1500);
+                statusBox.innerHTML = "";
+                const msg = document.createElement("div");
+                msg.innerText = st.step_desc;
+                msg.style.marginBottom = "10px";
+                const actions = document.createElement("div");
+                actions.className = "actions";
+                actions.innerHTML = `
+                    <button class="btn-sm btn-view" onclick="visualizarPdf('${ids}')">👁 Visualizar</button>
+                    <button class="btn-sm btn-dl" onclick="baixarPdf('${ids}')">⬇ Baixar PDF</button>
+                    <button class="btn-sm btn-print" onclick="imprimirDireto('${ids}', this)">🖨️ Imprimir</button>`;
+                statusBox.append(msg, actions);
+                atualizarHistorico();
             }
         }
     } catch (e) {
@@ -392,8 +448,120 @@ async function fecharConexaoSap() {
     }
 }
 
-function abrirImpressaoA4(idsCsv) {
-    window.open(`/imprimir_a4?ids=${idsCsv}`, "_blank");
+function visualizarPdf(idsCsv) {
+    window.open(`/fichas/pdf?ids=${idsCsv}`, "_blank");
+}
+
+function baixarPdf(idsCsv) {
+    window.location.href = `/fichas/pdf?ids=${idsCsv}&download=1`;
+}
+
+async function imprimirDireto(idsCsv, btn) {
+    const statusBox = document.getElementById("status_box");
+    const label = btn ? btn.innerText : "";
+    if (btn) { btn.disabled = true; btn.innerText = "Imprimindo..."; }
+    try {
+        const resp = await fetch("/api/imprimir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: idsCsv })
+        });
+        const res = await resp.json();
+        mostrarAviso(res.message, res.success);
+        if (!res.success && res.message.includes("Nenhuma impressora")) {
+            abrirSeletorImpressora();
+        }
+    } catch (e) {
+        mostrarAviso(`Falha ao imprimir: ${e}`, false);
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerText = label; }
+    }
+}
+
+function mostrarAviso(texto, sucesso) {
+    let box = document.getElementById("print_status");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "print_status";
+        box.style.cssText = "position:fixed;right:16px;bottom:16px;max-width:420px;z-index:60;box-shadow:0 4px 14px rgba(0,0,0,0.15);";
+        document.body.appendChild(box);
+    }
+    box.className = sucesso ? "status-msg status-success" : "status-msg status-error";
+    box.innerText = texto;
+    clearTimeout(box._timer);
+    box._timer = setTimeout(() => { box.className = "status-msg"; }, 6000);
+}
+
+async function atualizarHistorico() {
+    try {
+        const html = await (await fetch("/")).text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const novo = doc.querySelector("#historico tbody");
+        if (novo) document.querySelector("#historico tbody").innerHTML = novo.innerHTML;
+    } catch (e) {
+        console.error("Falha ao atualizar histórico:", e);
+    }
+}
+
+async function abrirSeletorImpressora() {
+    const modal = document.getElementById("printer_modal");
+    const select = document.getElementById("printer_select");
+    const msg = document.getElementById("printer_modal_msg");
+    const btnSalvar = document.getElementById("btn_salvar_impressora");
+    msg.className = "status-msg";
+    select.innerHTML = "<option>Carregando impressoras...</option>";
+    select.disabled = true;
+    btnSalvar.disabled = true;
+    modal.classList.add("open");
+
+    try {
+        const data = await (await fetch("/api/impressoras")).json();
+        select.innerHTML = "";
+        if (!data.impressoras.length) {
+            select.innerHTML = "<option value=''>Nenhuma impressora encontrada</option>";
+            msg.className = "status-msg status-error";
+            msg.innerText = data.disponivel
+                ? "Nenhuma impressora instalada no Windows."
+                : "Impressão direta indisponível (requer Windows com pywin32). Use Visualizar ou Baixar.";
+            return;
+        }
+        const atual = data.selecionada || data.padrao;
+        for (const nome of data.impressoras) {
+            const opt = document.createElement("option");
+            opt.value = nome;
+            opt.textContent = nome === data.padrao ? `${nome} (padrão do Windows)` : nome;
+            if (nome === atual) opt.selected = true;
+            select.appendChild(opt);
+        }
+        select.disabled = false;
+        btnSalvar.disabled = false;
+        select.focus();
+    } catch (e) {
+        msg.className = "status-msg status-error";
+        msg.innerText = `Falha ao listar impressoras: ${e}`;
+    }
+}
+
+async function salvarImpressora(nome) {
+    const msg = document.getElementById("printer_modal_msg");
+    const resp = await fetch("/api/impressora", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ impressora: nome })
+    });
+    const res = await resp.json();
+    if (!res.success) {
+        msg.className = "status-msg status-error";
+        msg.innerText = res.message;
+        return;
+    }
+    document.getElementById("printer_name").innerText = res.impressora;
+    document.getElementById("printer_none").style.display = res.impressora ? "none" : "inline";
+    document.getElementById("printer_modal").classList.remove("open");
+}
+
+if (SOLICITAR_IMPRESSORA) {
+    abrirSeletorImpressora();
 }
 </script>
 </body>

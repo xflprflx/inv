@@ -14,10 +14,10 @@ if errorlevel 1 (
 )
 
 echo Verificando dependencias necessarias...
-python -c "import flask, win32com, win32clipboard, pythoncom" >nul 2>&1
+python -c "import flask, win32com, win32clipboard, pythoncom, win32print, reportlab, pypdfium2, PIL" >nul 2>&1
 if errorlevel 1 (
-    echo Instalando Flask e pywin32...
-    pip install flask pywin32
+    echo Instalando Flask, pywin32, reportlab, pypdfium2 e Pillow...
+    pip install flask pywin32 reportlab pypdfium2 pillow
 )
 
 echo Iniciando servidor Flask e abrindo navegador...

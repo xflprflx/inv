@@ -7,7 +7,9 @@ import time
 import webbrowser
 from datetime import datetime
 from threading import Timer
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
+
+import impressao
 
 # Importação dos módulos nativos do Windows para Clipboard e Automação COM
 try:
@@ -21,6 +23,9 @@ except ImportError:
 
 app = Flask(__name__)
 DB_NAME = "inventario.db"
+
+# A impressora é confirmada pelo usuário a cada inicialização do programa
+printer_state = {"confirmada": False}
 
 
 # ==============================================================================
@@ -159,12 +164,67 @@ def init_db():
                 data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config (
+                chave TEXT PRIMARY KEY,
+                valor TEXT
+            )
+        """)
         # Migração segura caso o banco já exista de versões anteriores sem a coluna itens_json
         try:
             conn.execute("ALTER TABLE fichas ADD COLUMN itens_json TEXT DEFAULT '[]'")
         except sqlite3.OperationalError:
             pass
         conn.commit()
+
+
+def get_config(chave: str, default: str = "") -> str:
+    with get_db() as conn:
+        row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
+    return row["valor"] if row and row["valor"] is not None else default
+
+
+def set_config(chave: str, valor: str):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO config (chave, valor) VALUES (?, ?) "
+            "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor",
+            (chave, valor),
+        )
+        conn.commit()
+
+
+def carregar_fichas(id_list: list) -> list:
+    """Busca as fichas no SQLite já com a lista de itens decodificada."""
+    if not id_list:
+        return []
+    placeholders = ",".join(["?"] * len(id_list))
+    with get_db() as conn:
+        rows = conn.execute(f"SELECT * FROM fichas WHERE id IN ({placeholders}) ORDER BY id ASC", id_list).fetchall()
+
+    fichas = []
+    for r in rows:
+        try:
+            itens = json.loads(r["itens_json"] or "[]")
+        except Exception:
+            itens = []
+        fichas.append({
+            "id": r["id"],
+            "numero_ficha": r["numero_ficha"],
+            "centro": r["centro"],
+            "deposito": r["deposito"],
+            "endereco_inicio": (r["endereco_inicio"] or "").strip(),
+            "endereco_fim": (r["endereco_fim"] or "").strip(),
+            "data_criacao": r["data_criacao"],
+            "itens": itens,
+        })
+    return fichas
+
+
+def parse_ids(raw) -> list:
+    if isinstance(raw, list):
+        raw = ",".join(str(x) for x in raw)
+    return [int(x) for x in str(raw or "").split(",") if x.strip().isdigit()]
 
 
 # ==============================================================================
@@ -474,7 +534,12 @@ def index():
     """Renderiza o painel de controle e a tabela de histórico."""
     with get_db() as conn:
         fichas = conn.execute("SELECT * FROM fichas ORDER BY id DESC LIMIT 30").fetchall()
-    return render_template("index.html", fichas=fichas)
+    return render_template(
+        "index.html",
+        fichas=fichas,
+        solicitar_impressora=not printer_state["confirmada"],
+        impressora_atual=get_config("impressora"),
+    )
 
 
 @app.route("/api/iniciar", methods=["POST"])
@@ -548,45 +613,84 @@ def api_sap_fechar():
     return jsonify({"success": True, "message": message})
 
 
+@app.route("/api/impressoras", methods=["GET"])
+def api_impressoras():
+    """Lista as impressoras do Windows e a impressora atualmente selecionada."""
+    impressoras = impressao.listar_impressoras()
+    selecionada = get_config("impressora")
+    if selecionada not in impressoras:
+        selecionada = ""
+    return jsonify({
+        "disponivel": impressao.impressao_disponivel(),
+        "impressoras": impressoras,
+        "padrao": impressao.impressora_padrao(),
+        "selecionada": selecionada,
+    })
+
+
+@app.route("/api/impressora", methods=["POST"])
+def api_impressora():
+    """Salva a impressora escolhida (vazio = continuar sem impressão direta)."""
+    nome = (request.json or {}).get("impressora", "").strip()
+    if nome and nome not in impressao.listar_impressoras():
+        return jsonify({"success": False, "message": f"Impressora '{nome}' não encontrada."}), 400
+    set_config("impressora", nome)
+    printer_state["confirmada"] = True
+    return jsonify({"success": True, "impressora": nome})
+
+
+@app.route("/fichas/pdf")
+def fichas_pdf():
+    """
+    Gera o PDF A4 das fichas (?ids=1,2,3).
+    - Sem parâmetros extras: abre no visualizador de PDF do navegador.
+    - Com ?download=1: força o download do arquivo.
+    """
+    fichas = carregar_fichas(parse_ids(request.args.get("ids", "")))
+    if not fichas:
+        return "Nenhuma ficha selecionada.", 400
+
+    pdf_bytes = impressao.gerar_pdf_fichas(fichas)
+    numeros = "_".join(f["numero_ficha"] for f in fichas[:5])
+    if len(fichas) > 5:
+        numeros += f"_e_mais_{len(fichas) - 5}"
+    filename = f"fichas_MI31_{numeros}.pdf"
+    disposition = "attachment" if request.args.get("download") else "inline"
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+    )
+
+
+@app.route("/api/imprimir", methods=["POST"])
+def api_imprimir():
+    """Imprime as fichas diretamente na impressora selecionada, sem diálogo."""
+    body = request.json or {}
+    fichas = carregar_fichas(parse_ids(body.get("ids", "")))
+    if not fichas:
+        return jsonify({"success": False, "message": "Nenhuma ficha selecionada."}), 400
+
+    impressora = get_config("impressora")
+    if not impressora:
+        return jsonify({"success": False, "message": "Nenhuma impressora selecionada. Clique em 'Trocar impressora'."}), 400
+
+    try:
+        pdf_bytes = impressao.gerar_pdf_fichas(fichas)
+        paginas = impressao.imprimir_pdf(pdf_bytes, impressora, titulo=f"Fichas MI31 ({len(fichas)})")
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Falha ao imprimir: {e}"}), 500
+
+    return jsonify({
+        "success": True,
+        "message": f"{len(fichas)} ficha(s) enviada(s) para '{impressora}' ({paginas} página(s)).",
+    })
+
+
 @app.route("/imprimir_a4")
 def imprimir_a4():
-    """
-    Renderiza a página formatada para Folha A4 contendo:
-    - Código de barras grande
-    - Número da ficha grande abaixo do código
-    - Range de endereço (apenas se definido)
-    - Tabela de itens da ficha
-    Aceita ?ids=1,2,3 para imprimir múltiplas fichas geradas no lote de uma só vez.
-    """
-    ids_param = request.args.get("ids", "")
-    id_list = [int(x) for x in ids_param.split(",") if x.strip().isdigit()]
-
-    if not id_list:
-        return "Nenhuma ficha selecionada para impressão.", 400
-
-    placeholders = ",".join(["?"] * len(id_list))
-    with get_db() as conn:
-        rows = conn.execute(f"SELECT * FROM fichas WHERE id IN ({placeholders}) ORDER BY id ASC", id_list).fetchall()
-
-    fichas_formatadas = []
-    for r in rows:
-        try:
-            itens = json.loads(r["itens_json"] or "[]")
-        except Exception:
-            itens = []
-
-        fichas_formatadas.append({
-            "id": r["id"],
-            "numero_ficha": r["numero_ficha"],
-            "centro": r["centro"],
-            "deposito": r["deposito"],
-            "endereco_inicio": (r["endereco_inicio"] or "").strip(),
-            "endereco_fim": (r["endereco_fim"] or "").strip(),
-            "data_criacao": r["data_criacao"],
-            "itens": itens
-        })
-
-    return render_template("print_a4.html", fichas=fichas_formatadas)
+    """Compatibilidade: links antigos passam a abrir o PDF."""
+    return fichas_pdf()
 
 
 def open_browser():
