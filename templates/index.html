@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emissor de Fichas MI31 (A4) + Debug Passo a Passo</title>
+    <style>
+        :root {
+            --primary: #0f172a;
+            --accent: #2563eb;
+            --debug-bg: #1e293b;
+            --debug-accent: #f59e0b;
+            --success: #16a34a;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --text-muted: #64748b;
+        }
+        * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; }
+        body { background-color: var(--bg); color: var(--text); padding: 25px 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 22px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        h1 { font-size: 1.35rem; margin-bottom: 18px; color: var(--primary); }
+        h2 { font-size: 1.05rem; margin-bottom: 12px; color: var(--primary); }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
+
+        label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 5px; color: var(--text); }
+        input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+        textarea { resize: vertical; min-height: 85px; font-family: monospace; font-size: 0.85rem; }
+
+        .section-box { background: #f8fafc; border-radius: 6px; padding: 14px; margin-bottom: 16px; border: 1px solid #cbd5e1; }
+        .section-title { font-size: 0.82rem; font-weight: 700; color: #334155; margin-bottom: 10px; text-transform: uppercase; }
+        .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+        .checkbox-item { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: #334155; cursor: pointer; }
+        .checkbox-item input { width: 15px; height: 15px; cursor: pointer; }
+
+        /* Estilização exclusiva do Painel de Debug Passo a Passo */
+        .debug-panel { background: var(--debug-bg); color: #f8fafc; border-radius: 8px; padding: 16px; margin-bottom: 18px; border-left: 5px solid var(--debug-accent); }
+        .debug-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+        .debug-controls { display: none; margin-top: 14px; padding-top: 14px; border-top: 1px solid #334155; grid-template-columns: 1fr 1fr 220px; gap: 14px; align-items: end; }
+        .debug-controls.active { display: grid; }
+        .debug-status-bar { margin-top: 12px; background: #0f172a; padding: 10px 14px; border-radius: 6px; font-family: monospace; font-size: 0.88rem; display: flex; justify-content: space-between; align-items: center; }
+        .badge-paused { background: var(--debug-accent); color: #000; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem; animation: pulse 1.2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        button { background-color: var(--accent); color: white; border: none; padding: 12px 20px; border-radius: 6px; font-weight: 600; cursor: pointer; width: 100%; font-size: 0.95rem; transition: background 0.2s; }
+        button:hover { background-color: #1d4ed8; }
+        button:disabled { background-color: #64748b; cursor: not-allowed; opacity: 0.65; }
+        
+        .btn-play { background-color: var(--success); color: white; padding: 10px 16px; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .btn-play:hover { background-color: #15803d; }
+
+        .btn-sm { padding: 6px 12px; font-size: 0.8rem; width: auto; background-color: #0f172a; }
+        .btn-sm:hover { background-color: #334155; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.88rem; }
+        th, td { text-align: left; padding: 9px; border-bottom: 1px solid var(--border); }
+        th { color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
+
+        .status-msg { margin-top: 14px; padding: 12px; border-radius: 6px; font-size: 0.9rem; display: none; }
+        .status-success { background: #dcfce7; color: #166534; display: block; }
+        .status-error { background: #fee2e2; color: #991b1b; display: block; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <h1>Emissão de Fichas de Inventário MI31 (Formato A4)</h1>
+
+        <!-- PAINEL DE MODO DEBUG PASSO A PASSO -->
+        <div class="debug-panel">
+            <div class="debug-header">
+                <label class="checkbox-item" style="color: #fff; font-size: 0.95rem;">
+                    <input type="checkbox" id="debug_enabled" onchange="toggleDebugPanel()">
+                    <strong>Ativar Modo Debug Passo a Passo no SAP GUI</strong>
+                </label>
+                <span id="debug_badge" style="display: none;" class="badge-paused">AGUARDANDO PLAY</span>
+            </div>
+
+            <div id="debug_controls" class="debug-controls">
+                <div>
+                    <label for="debug_mode" style="color: #cbd5e1;">Tipo de Pausa entre Passos</label>
+                    <select id="debug_mode" onchange="toggleSecondsInput()">
+                        <option value="infinite">Pausa Infinita (Avançar manualmente no botão Play)</option>
+                        <option value="timed">Pausa por Tempo Definido (Segundos)</option>
+                    </select>
+                </div>
+                <div id="seconds_box" style="opacity: 0.4; pointer-events: none;">
+                    <label for="debug_seconds" style="color: #cbd5e1;">Tempo de Pausa (Segundos)</label>
+                    <input type="number" id="debug_seconds" value="2.5" step="0.5" min="0.5">
+                </div>
+                <div>
+                    <button type="button" id="btn_play_step" class="btn-play" onclick="dispararPlay()" disabled>
+                        ▶ Play / Próximo Passo
+                    </button>
+                </div>
+            </div>
+
+            <div class="debug-status-bar">
+                <span id="debug_step_text">Status: Pronto para iniciar.</span>
+                <span id="debug_step_counter">0 / 9</span>
+            </div>
+        </div>
+
+        <!-- Bloco 1: Lista de Itens -->
+        <div style="margin-bottom: 16px;">
+            <label for="materials_list">Lista de Itens / Materiais (R_MATNR - Cole do Excel ou separe por linha/vírgula)</label>
+            <textarea id="materials_list" placeholder="Cole aqui os códigos dos materiais (ex:&#10;110.345&#10;110.346)"></textarea>
+            <small style="color: var(--text-muted); font-size: 0.75rem;">Se deixado em branco, a folha A4 listará automaticamente os materiais extraídos da tabela gerada pelo SAP.</small>
+        </div>
+
+        <!-- Bloco 2: Dados Organizacionais -->
+        <div class="grid-4">
+            <div>
+                <label for="plant">Centro (WERKS)</label>
+                <input type="text" id="plant" value="4404">
+            </div>
+            <div>
+                <label for="storage_loc">Depósito (LGORT)</label>
+                <input type="text" id="storage_loc" value="0001">
+            </div>
+            <div>
+                <label for="max_positions">Máx. Itens/Doc (MAXPO)</label>
+                <input type="number" id="max_positions" value="333">
+            </div>
+            <div>
+                <label for="anziv">Máx. Docs (ANZIV)</label>
+                <input type="number" id="anziv" placeholder="Opcional">
+            </div>
+        </div>
+
+        <!-- Bloco 3: Range de Endereços (Opcional) -->
+        <div class="grid-2">
+            <div>
+                <label for="bin_start">Endereço Inicial (R_LGPBE De - Opcional)</label>
+                <input type="text" id="bin_start" placeholder="Ex: A.01.01.01" value="A.01.01.01">
+            </div>
+            <div>
+                <label for="bin_end">Endereço Final (R_LGPBE Até - Opcional)</label>
+                <input type="text" id="bin_end" placeholder="Ex: A.01.04.06" value="A.01.04.06">
+            </div>
+        </div>
+
+        <!-- Bloco 4: Modo de Processamento -->
+        <div class="section-box">
+            <div class="section-title">Modo de Processamento (CALL_FB vs LISTE)</div>
+            <div style="display: flex; gap: 24px;">
+                <label class="checkbox-item">
+                    <input type="radio" name="exec_mode" id="mode_direct" value="CALL_FB" checked>
+                    <strong>Processamento Direto (CALL_FB)</strong> - Cria documento e abre Folha A4 para impressão
+                </label>
+                <label class="checkbox-item">
+                    <input type="radio" name="exec_mode" id="mode_test" value="LISTE">
+                    <strong>Modo Teste / Lista (LISTE)</strong> - Apenas simula no SAP
+                </label>
+            </div>
+        </div>
+
+        <!-- Bloco 5: Controle Geral -->
+        <div class="section-box">
+            <div class="section-title">Controle Geral e Log (XDELE, XKEEP, XPROT)</div>
+            <div class="checkbox-grid">
+                <label class="checkbox-item"><input type="checkbox" id="chkXDELE" checked> Materiais Marcados p/ Eliminar (XDELE)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXPROT" checked> Gerar Log de Processamento (XPROT)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXKEEP"> Manter Sessão Batch (XKEEP)</label>
+            </div>
+        </div>
+
+        <!-- Bloco 6: Parâmetros de Estoque -->
+        <div class="section-box">
+            <div class="section-title">Parâmetros de Estoque e Bloqueio (PA_PBSTO)</div>
+            <div class="checkbox-grid">
+                <label class="checkbox-item"><input type="checkbox" id="chkSPERR" checked> Bloqueio de Postagem (SPERR)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXIMAT" checked> Estoque Próprio (XIMAT)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXICHA" checked> Considerar Lotes (XICHA)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXLABST" checked> Utilização Livre (XLABST)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXSPEME" checked> Estoque Bloqueado (XSPEME)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXBUFI"> Fixar Saldo Contábil (XBUFI)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXONUL"> Incluir Estoque Zero (XONUL)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXNULB"> Apenas Estoque Zero (XNULB)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXNEGB"> Estoque Negativo (XNEGB)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXINSME"> Controle de Qualidade (XINSME)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXWART"> Estoque em Devolução (XWART)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXUMKE"> Inverter Seleção Estoque (XUMKE)</label>
+                <label class="checkbox-item"><input type="checkbox" id="chkXUMKEW"> Inverter Seleção Valores (XUMKEW)</label>
+            </div>
+            <div style="margin-top: 12px;">
+                <label for="txtXBLNI">Texto/Doc. Referência Externa (XBLNI)</label>
+                <input type="text" id="txtXBLNI" placeholder="Opcional">
+            </div>
+        </div>
+
+        <button id="btn_gerar" onclick="iniciarExecucao()">Criar Ficha na MI31 e Abrir Impressão A4</button>
+        <div id="status_box" class="status-msg"></div>
+    </div>
+
+    <!-- Histórico SQLite -->
+    <div class="card">
+        <h2>Histórico de Fichas Emitidas</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Data/Hora</th>
+                    <th>Ficha SAP</th>
+                    <th>Centro/Dep.</th>
+                    <th>Range de Endereços</th>
+                    <th>Qtd. Itens</th>
+                    <th>Folha A4</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in fichas %}
+                <tr>
+                    <td>{{ f.data_criacao }}</td>
+                    <td><strong>{{ f.numero_ficha }}</strong></td>
+                    <td>{{ f.centro }} / {{ f.deposito }}</td>
+                    <td>
+                        {% if f.endereco_inicio or f.endereco_fim %}
+                            {{ f.endereco_inicio }} até {{ f.endereco_fim }}
+                        {% else %}
+                            <em>Não definido</em>
+                        {% endif %}
+                    </td>
+                    <td>{{ f.total_materiais }}</td>
+                    <td>
+                        <button class="btn-sm" onclick="abrirImpressaoA4('{{ f.id }}')">🖨️ Imprimir A4</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+let pollTimer = null;
+
+function toggleDebugPanel() {
+    const enabled = document.getElementById("debug_enabled").checked;
+    const controls = document.getElementById("debug_controls");
+    if (enabled) {
+        controls.classList.add("active");
+    } else {
+        controls.classList.remove("active");
+    }
+}
+
+function toggleSecondsInput() {
+    const mode = document.getElementById("debug_mode").value;
+    const secBox = document.getElementById("seconds_box");
+    if (mode === "timed") {
+        secBox.style.opacity = "1";
+        secBox.style.pointerEvents = "auto";
+    } else {
+        secBox.style.opacity = "0.4";
+        secBox.style.pointerEvents = "none";
+    }
+}
+
+async function iniciarExecucao() {
+    const btn = document.getElementById("btn_gerar");
+    const statusBox = document.getElementById("status_box");
+    const execMode = document.querySelector('input[name="exec_mode"]:checked').value;
+
+    const payload = {
+        materials_list: document.getElementById("materials_list").value,
+        plant: document.getElementById("plant").value.trim().toUpperCase(),
+        storage_loc: document.getElementById("storage_loc").value.trim().toUpperCase(),
+        max_positions: document.getElementById("max_positions").value,
+        anziv: document.getElementById("anziv").value,
+        bin_start: document.getElementById("bin_start").value.trim(),
+        bin_end: document.getElementById("bin_end").value.trim(),
+        exec_mode: execMode,
+
+        // Configurações de Debug
+        debug_enabled: document.getElementById("debug_enabled").checked,
+        debug_mode: document.getElementById("debug_mode").value,
+        debug_seconds: document.getElementById("debug_seconds").value,
+
+        // Flags Gerais e Estoque
+        chkXDELE: document.getElementById("chkXDELE").checked,
+        chkXPROT: document.getElementById("chkXPROT").checked,
+        chkXKEEP: document.getElementById("chkXKEEP").checked,
+        chkSPERR: document.getElementById("chkSPERR").checked,
+        chkXIMAT: document.getElementById("chkXIMAT").checked,
+        chkXICHA: document.getElementById("chkXICHA").checked,
+        chkXLABST: document.getElementById("chkXLABST").checked,
+        chkXSPEME: document.getElementById("chkXSPEME").checked,
+        chkXBUFI: document.getElementById("chkXBUFI").checked,
+        chkXONUL: document.getElementById("chkXONUL").checked,
+        chkXNULB: document.getElementById("chkXNULB").checked,
+        chkXNEGB: document.getElementById("chkXNEGB").checked,
+        chkXINSME: document.getElementById("chkXINSME").checked,
+        chkXWART: document.getElementById("chkXWART").checked,
+        chkXUMKE: document.getElementById("chkXUMKE").checked,
+        chkXUMKEW: document.getElementById("chkXUMKEW").checked,
+        txtXBLNI: document.getElementById("txtXBLNI").value.trim()
+    };
+
+    btn.disabled = true;
+    statusBox.style.display = "none";
+
+    const resp = await fetch("/api/iniciar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const res = await resp.json();
+
+    if (!res.success) {
+        statusBox.className = "status-msg status-error";
+        statusBox.innerText = res.message;
+        btn.disabled = false;
+        return;
+    }
+
+    // Inicia monitoramento em tempo real do progresso e das pausas de debug
+    pollTimer = setInterval(verificarStatusExecucao, 350);
+}
+
+async function verificarStatusExecucao() {
+    try {
+        const resp = await fetch("/api/debug/status");
+        const st = await resp.json();
+
+        document.getElementById("debug_step_text").innerText = st.step_desc;
+        document.getElementById("debug_step_counter").innerText = `${st.step_num} / ${st.total_steps}`;
+
+        const playBtn = document.getElementById("btn_play_step");
+        const badge = document.getElementById("debug_badge");
+
+        if (st.waiting_for_play) {
+            playBtn.disabled = false;
+            badge.style.display = "inline-block";
+        } else {
+            playBtn.disabled = true;
+            badge.style.display = "none";
+        }
+
+        // Verifica se a execução terminou
+        if (!st.is_running) {
+            clearInterval(pollTimer);
+            document.getElementById("btn_gerar").disabled = false;
+            playBtn.disabled = true;
+            badge.style.display = "none";
+
+            const statusBox = document.getElementById("status_box");
+            if (st.error) {
+                statusBox.className = "status-msg status-error";
+                statusBox.innerText = `Erro no SAP: ${st.error}`;
+            } else if (st.created_ids && st.created_ids.length > 0) {
+                statusBox.className = "status-msg status-success";
+                statusBox.innerText = `${st.step_desc} - Abrindo visualização A4...`;
+                abrirImpressaoA4(st.created_ids.join(","));
+                setTimeout(() => window.location.reload(), 1500);
+            }
+        }
+    } catch (e) {
+        console.error("Falha ao consultar status:", e);
+    }
+}
+
+async function dispararPlay() {
+    await fetch("/api/debug/play", { method: "POST" });
+}
+
+function abrirImpressaoA4(idsCsv) {
+    window.open(`/imprimir_a4?ids=${idsCsv}`, "_blank");
+}
+</script>
+</body>
+</html>

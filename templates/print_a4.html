@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Impressão de Ficha de Inventário A4</title>
+    <!-- Biblioteca JsBarcode para renderizar o código de barras Code 128 em alta nitidez vetorial (SVG) -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+    <style>
+        /* Configuração estrita para folha A4 Retrato */
+        @page {
+            size: A4 portrait;
+            margin: 12mm;
+        }
+        * {
+            box-sizing: border-box;
+            font-family: Arial, Helvetica, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background: #e2e8f0;
+            color: #000;
+            padding: 20px;
+        }
+
+        /* Barra superior exibida apenas na tela (some na impressão) */
+        .no-print-bar {
+            max-width: 210mm;
+            margin: 0 auto 15px auto;
+            background: #0f172a;
+            color: #fff;
+            padding: 12px 18px;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .btn-print {
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 0.95rem;
+        }
+
+        /* Contêiner A4 */
+        .a4-page {
+            width: 210mm;
+            min-height: 297mm;
+            margin: 0 auto 20px auto;
+            background: #fff;
+            padding: 15mm;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            page-break-after: always;
+        }
+        .a4-page:last-child {
+            page-break-after: auto;
+        }
+
+        /* Cabeçalho institucional da Ficha */
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 3px solid #000;
+            padding-bottom: 10px;
+            margin-bottom: 18px;
+        }
+        .header-title {
+            font-size: 1.5rem;
+            font-weight: 900;
+            letter-spacing: 0.5px;
+        }
+        .header-meta {
+            text-align: right;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+
+        /* Bloco Central de Destaque: Código de Barras Grande + Número da Ficha Grande abaixo */
+        .barcode-hero {
+            text-align: center;
+            border: 2px solid #000;
+            border-radius: 6px;
+            padding: 18px 10px;
+            margin-bottom: 18px;
+        }
+        .barcode-svg {
+            width: 85%;
+            max-width: 480px;
+            height: 115px;
+        }
+        .ficha-number-giant {
+            font-size: 2.8rem;
+            font-weight: 900;
+            letter-spacing: 3px;
+            margin-top: 6px;
+            color: #000;
+        }
+        .ficha-label {
+            font-size: 0.85rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #333;
+        }
+
+        /* Bloco Condicional do Range de Endereços */
+        .range-box {
+            border: 2px solid #000;
+            background: #f8fafc;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 18px;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+        }
+        .range-item {
+            text-align: center;
+        }
+        .range-label {
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .range-value {
+            font-size: 1.65rem;
+            font-weight: 900;
+            margin-top: 2px;
+        }
+
+        /* Tabela de Itens a Contar */
+        .items-section-title {
+            font-size: 1.05rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+        }
+        th, td {
+            border: 1px solid #000;
+            padding: 8px 10px;
+            font-size: 0.92rem;
+            text-align: left;
+        }
+        th {
+            background: #e2e8f0;
+            font-weight: 800;
+            text-transform: uppercase;
+            font-size: 0.82rem;
+        }
+        .col-count {
+            width: 140px;
+        }
+
+        /* Rodapé de assinatura do operador */
+        .footer-sign {
+            margin-top: 30px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            padding-top: 15px;
+        }
+        .sign-line {
+            border-top: 1px solid #000;
+            padding-top: 6px;
+            text-align: center;
+            font-size: 0.85rem;
+            font-weight: 700;
+        }
+
+        @media print {
+            body {
+                background: #fff;
+                padding: 0;
+            }
+            .no-print-bar {
+                display: none !important;
+            }
+            .a4-page {
+                box-shadow: none;
+                margin: 0;
+                width: 100%;
+                padding: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="no-print-bar">
+    <span><strong>Visualização de Impressão A4</strong> ({{ fichas|length }} ficha(s) pronta(s))</span>
+    <button class="btn-print" onclick="window.print()">🖨️ Confirmar Impressão A4</button>
+</div>
+
+{% for f in fichas %}
+<div class="a4-page">
+    <!-- Cabeçalho -->
+    <div class="header-top">
+        <div>
+            <div class="header-title">FICHA DE INVENTÁRIO FÍSICO (MI31)</div>
+            <div style="font-size: 0.9rem; margin-top: 4px;">Leitura Obrigatória via Coletor / Auditoria Física</div>
+        </div>
+        <div class="header-meta">
+            <div><strong>Centro:</strong> {{ f.centro }} | <strong>Depósito:</strong> {{ f.deposito }}</div>
+            <div><strong>Emissão:</strong> {{ f.data_criacao }}</div>
+        </div>
+    </div>
+
+    <!-- Código de Barras Grande + Número da Ficha Grande Abaixo -->
+    <div class="barcode-hero">
+        <div class="ficha-label">DOCUMENTO DE INVENTÁRIO SAP</div>
+        <svg class="barcode-svg" data-ficha="{{ f.numero_ficha }}"></svg>
+        <div class="ficha-number-giant">{{ f.numero_ficha }}</div>
+    </div>
+
+    <!-- Range de Endereços (Renderizado APENAS se foi definido na criação da ficha) -->
+    {% if f.endereco_inicio or f.endereco_fim %}
+    <div class="range-box">
+        <div class="range-item">
+            <div class="range-label">Endereço Inicial (De)</div>
+            <div class="range-value">{{ f.endereco_inicio or 'INÍCIO' }}</div>
+        </div>
+        <div style="font-size: 1.8rem; font-weight: 900;">➔</div>
+        <div class="range-item">
+            <div class="range-label">Endereço Final (Até)</div>
+            <div class="range-value">{{ f.endereco_fim or 'FIM' }}</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Lista de Itens da Ficha -->
+    <div class="items-section-title">Lista de Itens para Contagem ({{ f.itens|length }} registros)</div>
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 45px;">#</th>
+                <th>Código do Material</th>
+                <th>Lote</th>
+                <th>Posição no Depósito</th>
+                <th class="col-count">Qtd. Física Contada</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if f.itens %}
+                {% for item in f.itens %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td><strong>{{ item.material }}</strong></td>
+                    <td>{{ item.lote }}</td>
+                    <td>{{ item.posicao }}</td>
+                    <td></td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="5" style="text-align: center; padding: 15px;">
+                        Nenhum item individual listado. Consulte o coletor pelo código de barras da ficha <strong>{{ f.numero_ficha }}</strong>.
+                    </td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+
+    <!-- Assinatura do Auxiliar / Conferente -->
+    <div class="footer-sign">
+        <div class="sign-line">Nome Legível / Assinatura do Auxiliar de Contagem</div>
+        <div class="sign-line">Data / Hora de Conclusão e Visto da Liderança</div>
+    </div>
+</div>
+{% endfor %}
+
+<script>
+    // Renderiza todos os códigos de barra Code 128 sem texto nativo (pois usamos o texto gigante customizado abaixo)
+    document.querySelectorAll(".barcode-svg").forEach(function(svgElem) {
+        const num = svgElem.getAttribute("data-ficha");
+        JsBarcode(svgElem, num, {
+            format: "CODE128",
+            width: 3.2,
+            height: 105,
+            displayValue: false,
+            margin: 0
+        });
+    });
+
+    // Dispara automaticamente a janela de impressão do sistema assim que os códigos de barra são desenhados
+    window.addEventListener("load", function() {
+        setTimeout(function() {
+            window.print();
+        }, 400);
+    });
+</script>
+</body>
+</html>
