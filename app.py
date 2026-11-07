@@ -600,7 +600,7 @@ class SapAutomator:
                             p.get("storage_loc", "0001"),
                             bin_start,
                             bin_end,
-                            len(items_list),
+                            len(impressao.agrupar_itens(items_list)),
                             json.dumps(items_list, ensure_ascii=False),
                             str(p.get("max_positions", "333"))
                         )
