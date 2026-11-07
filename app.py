@@ -27,6 +27,10 @@ DB_NAME = "inventario.db"
 # GERENCIADOR DE ESTADO DE DEBUG E EXECUÇÃO PASSO A PASSO
 # ==============================================================================
 
+class ExecutionAborted(Exception):
+    """Lançada nos checkpoints quando o usuário solicita o fechamento da conexão."""
+
+
 class DebugExecutionController:
     """
     Controla o estado da automação em segundo plano e gerencia as pausas
@@ -41,6 +45,8 @@ class DebugExecutionController:
         self.current_step_desc = "Aguardando início..."
         self.error_message = None
         self.created_ficha_ids = []
+        self.abort_requested = False
+        self.sap_connection_id = None
         self.step_event = threading.Event()
 
     def reset(self):
@@ -51,12 +57,17 @@ class DebugExecutionController:
         self.current_step_desc = "Iniciando automação SAP..."
         self.error_message = None
         self.created_ficha_ids = []
+        self.abort_requested = False
+        self.sap_connection_id = None
         self.step_event.clear()
 
     def checkpoint(self, step_num: int, description: str, debug_config: dict):
         """
         Registra o passo atual da execução e aplica a pausa caso o Modo Debug esteja ativo.
         """
+        if self.abort_requested:
+            raise ExecutionAborted("Execução cancelada: conexão SAP fechada pelo usuário.")
+
         self.current_step_num = step_num
         self.current_step_desc = description
 
@@ -79,8 +90,16 @@ class DebugExecutionController:
             self.step_event.wait(timeout=max(0.1, seconds))
             self.waiting_for_play = False
 
+        if self.abort_requested:
+            raise ExecutionAborted("Execução cancelada: conexão SAP fechada pelo usuário.")
+
     def trigger_play(self):
         """Libera imediatamente a trava do passo atual."""
+        self.step_event.set()
+
+    def request_abort(self):
+        """Sinaliza o cancelamento e destrava qualquer pausa de debug pendente."""
+        self.abort_requested = True
         self.step_event.set()
 
 
@@ -241,6 +260,7 @@ class SapAutomator:
 
         # Inicializa o subsistema COM para a thread atual
         pythoncom.CoInitialize()
+        sap_gui_auto = application = connection = session = None
 
         try:
             # Conecta à sessão ativa do SAP GUI
@@ -248,6 +268,7 @@ class SapAutomator:
             application = sap_gui_auto.GetScriptingEngine
             connection = application.Children(0)
             session = connection.Children(0)
+            exec_ctrl.sap_connection_id = connection.Id
 
             # PASSO 1: Abrir transação MI31
             exec_ctrl.checkpoint(1, "Passo 1/9: Maximizando janela e abrindo transação /nMI31", debug_cfg)
@@ -406,7 +427,42 @@ class SapAutomator:
         finally:
             exec_ctrl.waiting_for_play = False
             exec_ctrl.is_running = False
+            # Libera as referências COM antes de desinicializar a thread
+            session = connection = application = sap_gui_auto = None
             pythoncom.CoUninitialize()
+
+
+def close_sap_connection() -> str:
+    """
+    Fecha a conexão do SAP GUI usada pela automação (ou a primeira conexão aberta).
+    Atenção: encerra a sessão logada no SAP, descartando dados não salvos.
+    """
+    if not win32com or not pythoncom:
+        raise RuntimeError("Módulos pywin32 (win32com / pythoncom) indisponíveis. Execute em Windows.")
+
+    pythoncom.CoInitialize()
+    sap_gui_auto = application = connection = None
+    try:
+        sap_gui_auto = win32com.client.GetObject("SAPGUI")
+        application = sap_gui_auto.GetScriptingEngine
+
+        if exec_ctrl.sap_connection_id:
+            try:
+                connection = application.findById(exec_ctrl.sap_connection_id)
+            except Exception:
+                connection = None
+        if connection is None:
+            if application.Children.Count == 0:
+                return "Nenhuma conexão SAP aberta."
+            connection = application.Children(0)
+
+        description = connection.Description or connection.Id
+        connection.CloseConnection()
+        exec_ctrl.sap_connection_id = None
+        return f"Conexão SAP '{description}' fechada."
+    finally:
+        connection = application = sap_gui_auto = None
+        pythoncom.CoUninitialize()
 
 
 # ==============================================================================
@@ -469,6 +525,27 @@ def api_debug_play():
     """
     exec_ctrl.trigger_play()
     return jsonify({"success": True})
+
+
+@app.route("/api/sap/fechar", methods=["POST"])
+def api_sap_fechar():
+    """
+    Cancela a execução em andamento (se houver) e fecha a conexão do SAP GUI.
+    """
+    if exec_ctrl.is_running:
+        exec_ctrl.request_abort()
+        # Aguarda a thread chegar a um checkpoint e encerrar (máx. ~3s)
+        for _ in range(30):
+            if not exec_ctrl.is_running:
+                break
+            time.sleep(0.1)
+
+    try:
+        message = close_sap_connection()
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Falha ao fechar conexão SAP: {e}"}), 500
+
+    return jsonify({"success": True, "message": message})
 
 
 @app.route("/imprimir_a4")
