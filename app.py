@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -23,6 +24,11 @@ except ImportError:
 
 app = Flask(__name__)
 DB_NAME = "inventario.db"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "execucao.log")
+
+# Log de diagnóstico da automação SAP (sobrescrito a cada nova execução)
+logger = logging.getLogger("mi31")
+logger.setLevel(logging.INFO)
 
 # A impressora é confirmada pelo usuário a cada inicialização do programa
 printer_state = {"confirmada": False}
@@ -75,6 +81,7 @@ class DebugExecutionController:
 
         self.current_step_num = step_num
         self.current_step_desc = description
+        logger.info(description)
 
         # Se o modo debug não estiver ativo, segue imediatamente sem pausar
         if not debug_config.get("enabled", False):
@@ -237,6 +244,36 @@ class SapAutomator:
     """
 
     @staticmethod
+    def dump_screen(session) -> None:
+        """Registra no log tudo o que está na tela atual do SAP (para diagnóstico)."""
+        try:
+            wnd = session.findById("wnd[0]")
+            logger.info("Transação: %s | Título da janela: %s", session.Info.Transaction, wnd.Text)
+            logger.info("Barra de status: [%s] %s", session.findById("wnd[0]/sbar").MessageType,
+                        session.findById("wnd[0]/sbar").Text)
+            try:
+                popup = session.findById("wnd[1]")
+                logger.info("Popup aberto (wnd[1]): %s", popup.Text)
+            except Exception:
+                pass
+
+            usr = session.findById("wnd[0]/usr")
+            logger.info("Elementos em wnd[0]/usr: %d", usr.Children.Count)
+            for i in range(min(usr.Children.Count, 400)):
+                try:
+                    el = usr.Children(i)
+                    pos = ""
+                    try:
+                        pos = f"linha={el.CharTop} col={el.CharLeft} "
+                    except Exception:
+                        pass
+                    logger.info("  %s %s%s = %r", el.Type, pos, el.Id.split("/usr/")[-1], str(el.Text)[:120])
+                except Exception as e:
+                    logger.info("  (falha ao ler elemento %d: %s)", i, e)
+        except Exception as e:
+            logger.info("Falha ao registrar a tela do SAP: %s", e)
+
+    @staticmethod
     def extract_docs_and_items_from_screen(session, fallback_materials: list) -> dict:
         """
         Lê todos os controles GuiLabel da tela 'Documentos inventário físico criados diretamente',
@@ -317,6 +354,16 @@ class SapAutomator:
             exec_ctrl.error_message = "Módulos pywin32 (win32com / pythoncom) indisponíveis. Execute em Windows."
             exec_ctrl.is_running = False
             return
+
+        # Reinicia o log de diagnóstico desta execução
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            h.close()
+        handler = logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
+        logger.addHandler(handler)
+        safe_params = {k: v for k, v in p.items() if k != "materials_list"}
+        logger.info("Parâmetros: %s", json.dumps(safe_params, ensure_ascii=False))
 
         # Inicializa o subsistema COM para a thread atual
         pythoncom.CoInitialize()
@@ -445,11 +492,21 @@ class SapAutomator:
 
             # PASSO 9: Extração dos Documentos e Itens da Tela de Saída
             exec_ctrl.checkpoint(9, "Passo 9/9: Lendo fichas e materiais gerados na tela de saída", debug_cfg)
+            cls.dump_screen(session)
             docs_map = cls.extract_docs_and_items_from_screen(session, mat_items)
+            status_text = session.findById("wnd[0]/sbar").Text
 
             if not docs_map:
-                status_text = session.findById("wnd[0]/sbar").Text
+                # Plano B: número do documento informado na barra de status do SAP
+                for doc_num in re.findall(r"\b\d{8,10}\b", status_text or ""):
+                    docs_map[doc_num] = [{"material": m, "lote": "-", "posicao": "-"} for m in mat_items]
+                if docs_map:
+                    logger.info("Fichas obtidas pela barra de status: %s", list(docs_map))
+
+            if not docs_map:
                 raise ValueError(f"Nenhuma ficha identificada na tela. Status SAP: '{status_text or 'Sem mensagem'}'")
+
+            logger.info("Fichas identificadas: %s", {k: len(v) for k, v in docs_map.items()})
 
             # Grava cada ficha e sua lista de itens no SQLite para geração da folha A4
             created_ids = []
@@ -483,8 +540,12 @@ class SapAutomator:
             exec_ctrl.current_step_desc = f"Concluído! Ficha(s) gerada(s): {', '.join(docs_map.keys())}"
 
         except Exception as e:
-            exec_ctrl.error_message = str(e)
+            exec_ctrl.error_message = f"{exec_ctrl.current_step_desc} -> {e}"
+            logger.exception("Erro na execução")
+            if session is not None and not isinstance(e, ExecutionAborted):
+                cls.dump_screen(session)
         finally:
+            logger.info("Fim da execução.")
             exec_ctrl.waiting_for_play = False
             exec_ctrl.is_running = False
             # Libera as referências COM antes de desinicializar a thread
@@ -611,6 +672,17 @@ def api_sap_fechar():
         return jsonify({"success": False, "message": f"Falha ao fechar conexão SAP: {e}"}), 500
 
     return jsonify({"success": True, "message": message})
+
+
+@app.route("/log")
+def ver_log():
+    """Exibe o log de diagnóstico da última execução da MI31."""
+    try:
+        with open(LOG_FILE, encoding="utf-8") as fh:
+            conteudo = fh.read()
+    except FileNotFoundError:
+        conteudo = "Nenhuma execução registrada ainda."
+    return Response(conteudo, mimetype="text/plain; charset=utf-8")
 
 
 @app.route("/api/impressoras", methods=["GET"])
